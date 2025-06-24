@@ -1269,6 +1269,10 @@ df_extc <- df_ext %>%
 df_ext <- df_ext %>% 
   left_join(df_extc, by = 'country') %>% 
   mutate(experienced_extreme_within = experienced_extreme - avg_experienced_extreme)
+
+# Re-standardize
+df_ext$avg_resilience_z <- as.numeric(scale(df_ext$avg_resilience, center = TRUE, scale = TRUE))
+df_ext$resilience_within_z <- as.numeric(scale(df_ext$resilience_within, center = TRUE, scale = TRUE))
 ```
 
 ```{r}
@@ -1310,6 +1314,59 @@ df_eff_ew <- get_effects(
 # 11.7% difference in people considering climate change a very serious threat
 df_eff_ew %>% 
   filter(group == 3)
+```
+
+Running a model with resilience as interaction factor.
+
+```{r}
+form_extreme_mod <- paste0(
+  'climate_threat ~ ',
+  'resilience_within_z * experienced_extreme_within + ',
+  'avg_experienced_extreme + avg_resilience_z + ',
+  'age + gender + education + individual_income + country_income + pct_university + ',
+  '(1 | country)'
+)
+
+mb_ext_mod <- run_model(
+  form_extreme_mod,
+  'models/model_multinomial_ew_moderation.RDS',
+  df_ext,
+  family = categorical(link = 'logit'),
+  chains = CHAINS, cores = CORES, iter = ITER, warmup = WARMUP
+)
+
+grid_ew_mod <- datagrid(
+  model = mb_ext_mod,
+  resilience_within_z = c(-1, 0, 1),
+  age = mean,
+  gender = c('male', 'female'),
+  education = c('elementary', 'secondary', 'university'),
+  country_income = unique(df$country_income),
+  individual_income = unique(df$individual_income)
+)
+
+df_eff_ew_mod <- get_effects(
+    mb_ext_mod, 'results/effects_ew_moderation.csv',
+    newdata = grid_ew_mod,
+    variables = 'experienced_extreme_within',
+    re_formula = NA, by = 'resilience_within_z'
+  ) %>% 
+  mutate(
+    group = factor(case_when(
+      group == 1 ~ 'No threat at all',
+      group == 2 ~ 'Somewhat serious threat',
+      group == 3 ~ 'Very serious threat'
+    ), levels = c('No threat at all', 'Somewhat serious threat', 'Very serious threat')),
+    resilience = ifelse(
+      resilience_within_z == 0, 'Average resilience',
+      ifelse(resilience_within_z == -1, '- 1SD resilience', '+ 1SD resilience')
+    ),
+    resilience = factor(resilience, levels = c('- 1SD resilience', 'Average resilience', '+ 1SD resilience'))
+  ) %>% 
+  filter(group == 'Very serious threat')
+
+# Basically no difference across resilience levels
+df_eff_ew_mod
 ```
 
 Running a multilevel logistic regression to assess country heterogeneity.
@@ -1607,7 +1664,7 @@ ggsave('figures/FigureS4.pdf', peffc, width = 9, height = 14)
 
 
 ## Supplementary figure 5: Standard deviation of random slopes
-```{r}
+```{r, fig.width = 10, fig.height = 5}
 df_sd <- VarCorr(mb_country)$country$sd %>% 
   data.frame() %>% 
   rownames_to_column() %>% 
@@ -1668,6 +1725,8 @@ psd <- ggplot(
     axis.text.y = element_text(size = 8),
     legend.title = element_blank()
   )
+
+psd
 ```
 
 ```{r}
