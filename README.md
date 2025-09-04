@@ -1,5 +1,5 @@
 # Hazard experience and climate risk perception
-This repository contains code to reproduce all analyses and figures for the paper Dablander, F. (2025). Climate hazard experience linked to increased climate risk perception worldwide.
+This repository contains code to reproduce all analyses and figures for the paper XXX (2025). Climate hazard experience linked to increased climate risk perception worldwide.
 
 - `analysis.Rmd` includes all analyses to reproduce results in the paper.
 - `analysis.html` is the compiled output of `analysis.Rmd'.

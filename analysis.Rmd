@@ -1,7 +1,7 @@
 ---
 title: "Data analysis: Climate hazard experience linked to increased climate risk perception worldwide"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
-author: Fabian Dablander
+author: 
 output:
   html_document:
     toc: true
@@ -18,7 +18,7 @@ knitr::opts_chunk$set(
 ```
 
 # Overview
-This RMarkdown file includes all code necessary to reproduce the analyses in Dablander (2025). Climate hazard experience linked to increased climate risk perception worldwide.
+This RMarkdown file includes all code necessary to reproduce the analyses in XXX (2025). Climate hazard experience linked to increased climate risk perception worldwide.
 
 # Data preparation
 You can find an online data exploration tool at the World Risk Data Poll website [here](https://lookerstudio.google.com/u/0/reporting/a83a8818-fe7f-46c6-b15a-3561e2a6d7d8/page/p_14f8d9qcid?s=lhpSUtubqLw). We load relevant packages and the data.
@@ -26,6 +26,7 @@ You can find an online data exploration tool at the World Risk Data Poll website
 ```{r}
 library(brms)
 library(dplyr)
+library(rstan)
 library(haven)
 library(tidyr)
 library(readxl)
@@ -137,6 +138,24 @@ df_full <- read.csv('data/23_wrp.csv') %>%
       tsunami | volcano | earthquake
     ),
     
+    hazard_type = case_when(
+      flooding == 1 ~ 'flooding',
+      hurricane == 1 ~ 'hurricane',
+      wildfire == 1 ~ 'wildfire',
+      heatwave == 1 ~ 'heatwave',
+      drought == 1 ~ 'drought',
+      thunder == 1 ~ 'thunder',
+      sandstorm == 1 ~ 'sandstorm',
+      snowstorm == 1 ~ 'snowstorm',
+      mudslide == 1 ~ 'mudslide',
+      tornado == 1 ~ 'tornado',
+      tsunami == 1 ~ 'tsunami',
+      volcano == 1 ~ 'volcano',
+      earthquake == 1 ~ 'earthquake',
+      .default = 'none'
+    ),
+    
+    # Recode, in raw data 1: very serious threat, 2: somewhat serious threat, 3: not a threat at all
     climate_threat = case_when(
       climate_threat == 1 ~ 3,
       climate_threat == 2 ~ 2,
@@ -153,8 +172,7 @@ df_full <- read.csv('data/23_wrp.csv') %>%
     climate_threat, weather_threat, experienced_weather_event, experienced_disaster,
     experienced_climate_disaster, disaster_type, flooding,
     hurricane, tornado, tsunami, mudslide, wildfire, drought, heatwave,
-    thunder, earthquake, volcano, sandstorm, snowstorm,
-    received_warning,
+    thunder, earthquake, volcano, sandstorm, snowstorm, hazard_type,
     
     # Resilience measures and similar
     household_cover_needs, household_cover_needs_weeks, household_cover_needs_months,
@@ -301,8 +319,6 @@ df_order <- df_agg %>%
 
 df_agg$country <- factor(df_agg$country, levels = df_order$country)
 df_agg <- filter(df_agg, name != 'prop_disasters')
-
-# fdablan@omics-h0.science.uva.nl:/zfs/omics/personal/fdablan
 ```
   
 ## Hazard frequency
@@ -741,13 +757,13 @@ df_sum
 ```
 
 # Data analysis
-We decompose the effect of a particular hazard experience into within- and between-country effects (see paper for details).
+We estimate a model that disentangles within-country from between-country effects (see paper for details).
 
 ```{r}
 CHAINS <- 12
 CORES <- 12
-ITER <- 1200
-WARMUP <- 500
+ITER <- 600
+WARMUP <- 250
 
 df_between <- df %>% 
   group_by(country) %>% 
@@ -767,36 +783,24 @@ df_between <- df %>%
     avg_tornado = mean(tornado),
     
     avg_resilience = mean(resilience_index, na.rm = TRUE),
+    avg_resilience_individual = mean(resilience_individual, na.rm = TRUE),
+    avg_resilience_household = mean(resilience_household, na.rm = TRUE),
     pct_university = mean(education == 'university')
   )
 
 df <- df %>% 
-  left_join(df_between, by = 'country') %>%
+  left_join(df_between, by = 'country') %>% 
   mutate(
-    flooding_within = flooding - avg_flooding,
-    hurricane_within = hurricane - avg_hurricane,
-    wildfire_within = wildfire - avg_wildfire,
-    heatwave_within = heatwave - avg_heatwave,
-    drought_within = drought - avg_drought,
-    thunder_within = thunder - avg_thunder,
-    snowstorm_within = snowstorm - avg_snowstorm,
-    sandstorm_within = sandstorm - avg_sandstorm,
-    mudslide_within = mudslide - avg_mudslide,
-    tsunami_within = tsunami - avg_tsunami,
-    volcano_within = volcano - avg_volcano,
-    earthquake_within = earthquake - avg_earthquake,
-    tornado_within = tornado - avg_tornado,
-    resilience_within = resilience_index - avg_resilience
+    resilience_within = resilience_index - avg_resilience,
+    resilience_individual_within = resilience_individual - avg_resilience_individual,
+    resilience_household_within = resilience_household - avg_resilience_household
   )
 ```
 
 ## Figure 2: Within- and between-country effects
 ```{r}
 form_spec <- paste0(
-  'climate_threat ~ ',
-  'flooding_within + hurricane_within + wildfire_within + ',
-  'heatwave_within + drought_within + thunder_within + snowstorm_within + sandstorm_within + ',
-  'mudslide_within + volcano_within + earthquake_within + tornado_within + ',
+  'climate_threat ~ hazard_type + ',
   'avg_flooding + avg_hurricane + avg_wildfire + ',
   'avg_heatwave + avg_drought + avg_thunder + avg_snowstorm + avg_sandstorm + ',
   'avg_mudslide + avg_volcano + avg_earthquake + avg_tornado + ',
@@ -814,9 +818,13 @@ apply(df_events, 2, sum)
 round(apply(df_events, 2, mean), 3)
 ```
 
-We run the model.
+We estimate the model.
 
 ```{r}
+# Remove hazard type tsunami, as there are only n = 14
+df <- df %>% filter(hazard_type != 'tsunami')
+df$hazard_type <- relevel(factor(df$hazard_type), ref = 'none')
+
 mb_spec <- run_model(
   form_spec,
   'models/model_multinomial.RDS',
@@ -835,25 +843,23 @@ grid_mn <- datagrid(
   gender = c('male', 'female'),
   education = c('elementary', 'secondary', 'university'),
   country_income = unique(df$country_income),
-  individual_income = unique(df$individual_income)
+  individual_income = unique(df$individual_income),
+  hazard_type = factor(df$hazard_type)
 )
 
 df_eff_mn <- get_effects(
     mb_spec, 'results/effects_main.csv',
-    newdata = grid_mn,
+    newdata = grid_mn2,
     variables = c(
       c(
-        paste0(climate_events, '_within'), paste0('avg_', climate_events),
+        'hazard_type', paste0('avg_', climate_events),
         'education', 'country_income', 'individual_income', 'pct_university'
       )
     ), re_formula = NA
   ) %>% 
   # Only keep hazards and one contrast for education and one for income
   filter(
-    contrast %in% c(
-      'dY/dX', 'university - elementary',
-      'richest20 - poorest20', 'high - lower', 'pct_university'
-    )
+    grepl('none|dY/dX|university - elementary|richest20 - poorest20|high - lower|pct_university', contrast)
   ) %>% 
   mutate(
     group = factor(case_when(
@@ -866,7 +872,7 @@ df_eff_mn <- get_effects(
       str_extract(term, '(?<=_).*'),
       str_extract(term, '^[^_]+')
     ),
-    climate_related = ifelse(event %in% climate_events, 1, 0),
+    climate_related = ifelse(event %in% climate_events | term == 'hazard_type', 1, 0),
     climate_related = factor(
       climate_related,
       levels = c(1, 0),
@@ -877,6 +883,11 @@ df_eff_mn <- get_effects(
     type = factor(type, levels = c('Within-country', 'Between-country')),
     event = str_to_title(event),
     event = map_hazards[event],
+    event = ifelse(
+      is.na(event),
+      map_hazards[str_to_title(str_extract(contrast, '^[^-]+') %>% str_trim())],
+      event
+    ),
     event = ifelse(term == 'education', 'University\nvs\nelementary', event),
     event = ifelse(term == 'pct_university', 'Percentage\nuniversity\nedcuation', event),
     event = ifelse(term == 'individual_income', 'Richest 20%\nvs\npoorest 20%', event),
@@ -886,7 +897,7 @@ df_eff_mn <- get_effects(
 df_eff_mn_within <- df_eff_mn %>% 
   filter(
     group == 'Very serious threat',
-    type == 'Within-country' # Between-country is all over the place
+    type == 'Within-country'
   ) %>% 
   arrange(climate_related, -estimate) %>% 
   mutate(event = factor(event, levels = event))
@@ -957,9 +968,8 @@ grid.arrange(
 dev.off()
 ```
 
-
 ## Figure 3: Moderation analysis with resilience
-We run a model that includes a within-country interaction of the climate-hazard experience and an individual within-country resilience index.
+We run a model that includes a within-country interaction of the climate-hazard experience and a within-country resilience index (combining individual, household, community, and societal resilience).
 
 ```{r}
 df$avg_resilience_z <- as.numeric(scale(df$avg_resilience, center = TRUE, scale = TRUE))
@@ -967,10 +977,7 @@ df$resilience_within_z <- as.numeric(scale(df$resilience_within, center = TRUE, 
 
 form_spec_mod <- paste0(
   'climate_threat ~ ',
-  'resilience_within_z * (',
-  'flooding_within + hurricane_within + wildfire_within + ',
-  'heatwave_within + drought_within + thunder_within + snowstorm_within + sandstorm_within + ',
-  'mudslide_within + tornado_within + volcano_within + earthquake_within) + ',
+  'resilience_within_z * hazard_type + ',
   'avg_flooding + avg_hurricane + avg_wildfire + ',
   'avg_heatwave + avg_drought + avg_thunder + avg_snowstorm + avg_sandstorm + ',
   'avg_mudslide + avg_tornado + avg_volcano + avg_earthquake + avg_resilience_z + ',
@@ -997,16 +1004,20 @@ grid_mod <- datagrid(
   gender = c('male', 'female'),
   education = c('elementary', 'secondary', 'university'),
   country_income = unique(df$country_income),
-  individual_income = unique(df$individual_income)
+  individual_income = unique(df$individual_income),
+  hazard_type = levels(df$hazard_type)
 )
 
 df_eff_mod <- get_effects(
     mb_spec_mod, 'results/effects_moderation.csv',
-    newdata = grid_mod1,
-    variables = c(paste0(climate_events, '_within'), paste0('avg_', climate_events)),
+    newdata = grid_mod,
+    variables = 'hazard_type',
     re_formula = NA, by = 'resilience_within_z'
   ) %>% 
   # Only keep hazards and one contrast for education and one for income
+  filter(
+    grepl('none|dY/dX|university - elementary|richest20 - poorest20|high - lower|pct_university', contrast)
+  ) %>% 
   mutate(
     group = factor(case_when(
       group == 1 ~ 'No threat at all',
@@ -1019,9 +1030,19 @@ df_eff_mod <- get_effects(
       str_extract(term, "^[^_]+")
     ),
     type = ifelse(str_starts(term, 'avg'), 'Between-country', 'Within-country'),
+    type = ifelse(term %in% c('country_income', 'pct_university'), 'Between-country', type),
     type = factor(type, levels = c('Within-country', 'Between-country')),
     event = str_to_title(event),
     event = map_hazards[event],
+    event = ifelse(
+      is.na(event),
+      map_hazards[str_to_title(str_extract(contrast, '^[^-]+') %>% str_trim())],
+      event
+    ),
+    event = ifelse(term == 'education', 'University\nvs\nelementary', event),
+    event = ifelse(term == 'pct_university', 'Percentage\nuniversity\nedcuation', event),
+    event = ifelse(term == 'individual_income', 'Richest 20%\nvs\npoorest 20%', event),
+    event = ifelse(term == 'country_income', 'High income\nvs\nlow income', event),
     resilience = ifelse(
       resilience_within_z == 0, 'Average resilience',
       ifelse(resilience_within_z == -1, '- 1SD resilience', '+ 1SD resilience')
@@ -1029,7 +1050,7 @@ df_eff_mod <- get_effects(
     resilience = factor(resilience, levels = c('- 1SD resilience', 'Average resilience', '+ 1SD resilience'))
   )
 
-cols <- rev(c("#D55E00", "#0072B2", "#009E73"))
+cols <- c("#D55E00", "#0072B2", "#009E73")
 pint <- ggplot(
   df_eff_mod %>%
     filter(
@@ -1051,7 +1072,7 @@ pint <- ggplot(
     y = "Percentage difference (very serious threat)"
   ) +
   scale_color_manual(values = cols) +
-  scale_y_continuous(breaks = seq(-20, 35, 5), limits = c(-20, 35)) +
+  scale_y_continuous(breaks = seq(-20, 25, 5), limits = c(-20, 26.5)) +
   theme_minimal() +
   theme(
     legend.position = 'top',
@@ -1077,17 +1098,12 @@ df_country <- df %>%
 
 form_spec_ml <- paste0(
   'climate_threat_bin ~ ',
-  'flooding_within + hurricane_within + wildfire_within + ',
-  'heatwave_within + drought_within + thunder_within + snowstorm_within + sandstorm_within + ',
-  'mudslide_within + volcano_within + earthquake_within + tornado_within + ',
+  'hazard_type + ',
   'avg_flooding + avg_hurricane + avg_wildfire + ',
   'avg_heatwave + avg_drought + avg_thunder + avg_snowstorm + avg_sandstorm + ',
   'avg_mudslide + avg_volcano + avg_earthquake + avg_tornado + ',
   'age + gender + education + individual_income + country_income + pct_university + ',
-  '(1 + flooding_within + hurricane_within + wildfire_within + ',
-  'heatwave_within + drought_within + thunder_within + snowstorm_within + sandstorm_within + ',
-  'mudslide_within + volcano_within + earthquake_within + tornado_within + ',
-  'education + individual_income || country)'
+  '(1 + hazard_type + education + individual_income || country)'
 )
 
 mb_country <- run_model(
@@ -1098,11 +1114,9 @@ mb_country <- run_model(
   chains = CHAINS, cores = CORES, iter = ITER, warmup = WARMUP
 )
 
-variables <- c(paste0(climate_events, '_within'), 'individual_income', 'education')
-variables <- variables[variables != 'tsunami_within']
+variables <- c('hazard_type', 'individual_income', 'education')
 # calculate_effects(df_country, mb_country, variables)
-
-df_effects <- read.csv('models/effects/effects_country_percentages.csv')
+df_effects <- read.csv('results/effects_country_percentages.csv')
 ```
 
 ```{r}
@@ -1121,15 +1135,13 @@ df_prev <- df %>%
   )
 
 df_effects <- df_effects %>% 
-  mutate(
-    hazard = term
-  ) %>% 
+  mutate(hazard = term) %>% 
   left_join(
     df_prev, by = c('country', 'hazard')
   ) %>% 
   mutate(
     occurs = ifelse(is.na(occurs), TRUE, occurs),
-    climate_related = ifelse(hazard %in% c('individual', 'education'), FALSE, TRUE)
+    climate_related = ifelse(hazard %in% c('individual_income', 'education'), FALSE, TRUE)
   )
 
 df_effects_group <- df_effects %>% 
@@ -1149,8 +1161,8 @@ df_effects_order <- df_effects_group %>%
   arrange(size_ci)
 
 hazard_order <- c(
-  df_effects_order$hazard[!(df_effects_order$hazard %in% c('individual', 'education'))],
-  'education', 'individual'
+  df_effects_order$hazard[!(df_effects_order$hazard %in% c('individual_income', 'education'))],
+  'education', 'individual_income'
 )
 
 df_effects_occurs$hazard <- factor(
@@ -1159,7 +1171,7 @@ df_effects_occurs$hazard <- factor(
 )
 
 map_all <- map_hazards
-map_all['Individual'] <- 'Richest 20%\nvs\npoorest 20%'
+map_all['Individual_income'] <- 'Richest 20%\nvs\npoorest 20%'
 map_all['Education'] <- 'University\nvs\nelementary'
 
 df_effects_occurs <- df_effects_occurs %>% 
@@ -1215,7 +1227,6 @@ pcountry
 ```{r}
 ggsave('figures/Figure4.pdf', pcountry, width = 11, height = 5)
 ```
-
 
 ## Effect of extreme weather
 The data includes a variable on whether the respondents have experienced an extreme weather event in the last two years. We analyse the effect of this on climate risk perceptions here.
@@ -1313,10 +1324,10 @@ df_eff_ew <- get_effects(
 
 # 11.7% difference in people considering climate change a very serious threat
 df_eff_ew %>% 
-  filter(group == 3)
+  filter(group == 3, term == 'experienced_extreme_within')
 ```
 
-Running a model with resilience as interaction factor.
+Running the model with resilience as interaction factor.
 
 ```{r}
 form_extreme_mod <- paste0(
@@ -1366,10 +1377,11 @@ df_eff_ew_mod <- get_effects(
   filter(group == 'Very serious threat')
 
 # Basically no difference across resilience levels
-df_eff_ew_mod
+df_eff_ew_mod %>% 
+  select(-term, -contrast, -resilience)
 ```
 
-Running a multilevel logistic regression to assess country heterogeneity.
+We run a multilevel logistic regression to assess country heterogeneity.
 
 ```{r}
 form_extreme_bin <- paste0(
@@ -1394,7 +1406,7 @@ Let's estimate the country variation in extreme weather events.
 
 ```{r}
 # calculate_effects(df_ext, mb_ext, 'experienced_extreme_within')
-df_effects_ew <- read.csv('models/effects/effects_country_percentages_ew.csv')
+df_effects_ew <- read.csv('results/effects_country_percentages_ew.csv')
 quantile(df_effects_ew$estimate, c(0.025, 0.975))
 ```
 
@@ -1449,7 +1461,7 @@ dev.off()
 We visualize the within- and between-country effects across all levels of climate risk perception.
 
 ```{r, fig.width = 9, fig.height = 8}
-cols <- rev(c("#D55E00", "#0072B2", "#009E73"))
+cols <- rev(c('#D55E00', '#0072B2', '#009E73'))
 pallw <- ggplot(
   df_eff_mn %>%
     filter(type == 'Within-country') %>% 
@@ -1545,17 +1557,259 @@ grid.arrange(
 dev.off()
 ```
 
-## Supplementary figure 3: Correlations of predictor variables
-We visualize the Pearson correlations of within- and between-country as well as socio-demographic variables.
+## Supplementary figure 3: Moderation with individual & household resilience
+We run the moderation analysis for individual-level and household-level resilience.
+
+```{r}
+df$avg_resilience_individual_z <- as.numeric(
+  scale(df$avg_resilience_individual, center = TRUE, scale = TRUE)
+)
+df$resilience_individual_within_z <- as.numeric(
+  scale(df$resilience_individual_within, center = TRUE, scale = TRUE)
+)
+
+df$avg_resilience_household_z <- as.numeric(
+  scale(df$avg_resilience_household, center = TRUE, scale = TRUE)
+)
+df$resilience_household_within_z <- as.numeric(
+  scale(df$resilience_household_within, center = TRUE, scale = TRUE)
+)
+
+form_spec_mod_individual <- paste0(
+  'climate_threat ~ ',
+  'resilience_individual_within_z * hazard_type + ',
+  'avg_flooding + avg_hurricane + avg_wildfire + ',
+  'avg_heatwave + avg_drought + avg_thunder + avg_snowstorm + avg_sandstorm + ',
+  'avg_mudslide + avg_tornado + avg_volcano + avg_earthquake + avg_resilience_individual_z + ',
+  'age + gender + education + individual_income + country_income + pct_university + ',
+  '(1 | country)'
+)
+
+form_spec_mod_household <- paste0(
+  'climate_threat ~ ',
+  'resilience_household_within_z * hazard_type + ',
+  'avg_flooding + avg_hurricane + avg_wildfire + ',
+  'avg_heatwave + avg_drought + avg_thunder + avg_snowstorm + avg_sandstorm + ',
+  'avg_mudslide + avg_tornado + avg_volcano + avg_earthquake + avg_resilience_household_z + ',
+  'age + gender + education + individual_income + country_income + pct_university + ',
+  '(1 | country)'
+)
+
+mb_spec_mod_individual <- run_model(
+  form_spec_mod_individual,
+  'models/model_multinomial_moderation_individual.RDS',
+  df,
+  family = categorical(link = 'logit'),
+  chains = CHAINS, cores = CORES, iter = ITER, warmup = WARMUP
+)
+
+mb_spec_mod_household <- run_model(
+  form_spec_mod_household,
+  'models/model_multinomial_moderation_household.RDS',
+  df,
+  family = categorical(link = 'logit'),
+  chains = CHAINS, cores = CORES, iter = ITER, warmup = WARMUP
+)
+```
+
+Let's visualize the marginal effects for different levels of resilience for the individual and household resilience models, respectively.
+
+```{r}
+grid_mod_individual <- datagrid(
+  model = mb_spec_mod_individual,
+  resilience_individual_within_z = c(-1, 0, 1),
+  age = mean,
+  gender = c('male', 'female'),
+  education = c('elementary', 'secondary', 'university'),
+  country_income = unique(df$country_income),
+  individual_income = unique(df$individual_income),
+  hazard_type = levels(df$hazard_type)
+) 
+
+df_eff_mod_individual <- get_effects(
+    mb_spec_mod_individual, 'results/effects_moderation_individual.csv',
+    newdata = grid_mod_individual,
+    variables = 'hazard_type',
+    re_formula = NA, by = 'resilience_individual_within_z'
+  ) %>% 
+    filter(
+    grepl('none|dY/dX|university - elementary|richest20 - poorest20|high - lower|pct_university', contrast)
+  ) %>% 
+  mutate(
+    group = factor(case_when(
+      group == 1 ~ 'No threat at all',
+      group == 2 ~ 'Somewhat serious threat',
+      group == 3 ~ 'Very serious threat'
+    ), levels = c('No threat at all', 'Somewhat serious threat', 'Very serious threat')),
+    event = ifelse(
+      str_starts(term, 'avg'),
+      str_extract(term, '(?<=_).*'),
+      str_extract(term, "^[^_]+")
+    ),
+    type = ifelse(str_starts(term, 'avg'), 'Between-country', 'Within-country'),
+    type = ifelse(term %in% c('country_income', 'pct_university'), 'Between-country', type),
+    type = factor(type, levels = c('Within-country', 'Between-country')),
+    event = str_to_title(event),
+    event = map_hazards[event],
+    event = ifelse(
+      is.na(event),
+      map_hazards[str_to_title(str_extract(contrast, '^[^-]+') %>% str_trim())],
+      event
+    ),
+    event = ifelse(term == 'education', 'University\nvs\nelementary', event),
+    event = ifelse(term == 'pct_university', 'Percentage\nuniversity\nedcuation', event),
+    event = ifelse(term == 'individual_income', 'Richest 20%\nvs\npoorest 20%', event),
+    event = ifelse(term == 'country_income', 'High income\nvs\nlow income', event),
+    resilience = ifelse(
+      resilience_individual_within_z == 0, 'Average resilience',
+      ifelse(resilience_individual_within_z == -1, '- 1SD resilience', '+ 1SD resilience')
+    ),
+    resilience = factor(resilience, levels = c('- 1SD resilience', 'Average resilience', '+ 1SD resilience'))
+  )
+
+cols <- c('#D55E00', '#0072B2', '#009E73')
+pint_ind <- ggplot(
+  df_eff_mod_individual %>%
+    filter(
+      type == 'Within-country',
+      group == 'Very serious threat'
+    ) %>% 
+    mutate(
+      event = factor(event, levels = levels(df_eff_mn_within$event))
+    ),
+  aes(x = event, y = estimate * 100, color = factor(resilience))
+) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(position = position_dodge(width = 0.50), size = 3) +
+  geom_errorbar(aes(ymin = conf.low * 100, ymax = conf.high * 100),
+                position = position_dodge(width = 0.50), width = 0.40, size = 1) +
+  labs(
+    title = "",
+    x = "",
+    y = "Percentage difference (very serious threat)"
+  ) +
+  scale_color_manual(values = cols) +
+  scale_y_continuous(breaks = seq(-20, 25, 5), limits = c(-20, 25)) +
+  theme_minimal() +
+  theme(
+    legend.position = 'top',
+    legend.title = element_blank(),
+    axis.text.x = element_text(angle = 0)
+  )
+
+pint_ind
+```
+
+```{r}
+grid_mod_household <- datagrid(
+  model = mb_spec_mod_household,
+  resilience_household_within_z = c(-1, 0, 1),
+  age = mean,
+  gender = c('male', 'female'),
+  education = c('elementary', 'secondary', 'university'),
+  country_income = unique(df$country_income),
+  individual_income = unique(df$individual_income),
+  hazard_type = levels(df$hazard_type)
+)
+
+df_eff_mod_household <- get_effects(
+    mb_spec_mod_household, 'results/effects_moderation_household.csv',
+    newdata = grid_mod_household,
+    variables = 'hazard_type', 
+    re_formula = NA, by = 'resilience_household_within_z'
+  ) %>% 
+    filter(
+    grepl('none|dY/dX|university - elementary|richest20 - poorest20|high - lower|pct_university', contrast)
+  ) %>% 
+  mutate(
+    group = factor(case_when(
+      group == 1 ~ 'No threat at all',
+      group == 2 ~ 'Somewhat serious threat',
+      group == 3 ~ 'Very serious threat'
+    ), levels = c('No threat at all', 'Somewhat serious threat', 'Very serious threat')),
+    event = ifelse(
+      str_starts(term, 'avg'),
+      str_extract(term, '(?<=_).*'),
+      str_extract(term, "^[^_]+")
+    ),
+    type = ifelse(str_starts(term, 'avg'), 'Between-country', 'Within-country'),
+    type = ifelse(term %in% c('country_income', 'pct_university'), 'Between-country', type),
+    type = factor(type, levels = c('Within-country', 'Between-country')),
+    event = str_to_title(event),
+    event = map_hazards[event],
+    event = ifelse(
+      is.na(event),
+      map_hazards[str_to_title(str_extract(contrast, '^[^-]+') %>% str_trim())],
+      event
+    ),
+    event = ifelse(term == 'education', 'University\nvs\nelementary', event),
+    event = ifelse(term == 'pct_university', 'Percentage\nuniversity\nedcuation', event),
+    event = ifelse(term == 'individual_income', 'Richest 20%\nvs\npoorest 20%', event),
+    event = ifelse(term == 'country_income', 'High income\nvs\nlow income', event),
+    resilience = ifelse(
+      resilience_household_within_z == 0, 'Average resilience',
+      ifelse(resilience_household_within_z == -1, '- 1SD resilience', '+ 1SD resilience')
+    ),
+    resilience = factor(resilience, levels = c('- 1SD resilience', 'Average resilience', '+ 1SD resilience'))
+  )
+
+pint_hh <- ggplot(
+  df_eff_mod_household %>%
+    filter(
+      type == 'Within-country',
+      group == 'Very serious threat'
+    ) %>% 
+    mutate(
+      event = factor(event, levels = levels(df_eff_mn_within$event))
+    ),
+  aes(x = event, y = estimate * 100, color = factor(resilience))
+) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(position = position_dodge(width = 0.50), size = 3) +
+  geom_errorbar(aes(ymin = conf.low * 100, ymax = conf.high * 100),
+                position = position_dodge(width = 0.50), width = 0.40, size = 1) +
+  labs(
+    title = "",
+    x = "",
+    y = "Percentage difference (very serious threat)"
+  ) +
+  scale_color_manual(values = cols) +
+  scale_y_continuous(breaks = seq(-20, 25, 5), limits = c(-22, 25)) +
+  theme_minimal() +
+  theme(
+    legend.position = 'top',
+    legend.title = element_blank(),
+    axis.text.x = element_text(angle = 0)
+  )
+
+pint_hh
+```
+
+```{r}
+pdf('figures/FigureS3.pdf', width = 9, height = 9)
+grid.arrange(
+  ncol = 1,
+  pint_ind +
+    ggtitle('Moderation with individual resilience') +
+    theme(plot.title = element_text(hjust = 0.50)),
+  pint_hh +
+    ggtitle('Moderation with household resilience') +
+    theme(plot.title = element_text(hjust = 0.50))
+)
+dev.off()
+```
+
+## Supplementary figure 4: Correlations of predictor variables
+We visualize the Pearson correlations of and between-country and socio-demographic variables, including resilience.
 
 ```{r}
 preds <- c(
-  'flooding_within', 'hurricane_within', 'wildfire_within',
-  'heatwave_within', 'drought_within', 'thunder_within', 'snowstorm_within', 'sandstorm_within',
-  'mudslide_within', 'tornado_within', 'volcano_within', 'earthquake_within', 'resilience_within',
   'avg_flooding', 'avg_hurricane', 'avg_wildfire', 'avg_heatwave', 'avg_drought',
   'avg_thunder', 'avg_snowstorm', 'avg_sandstorm', 'avg_mudslide', 'avg_tornado',
-  'avg_volcano', 'avg_earthquake', 'avg_resilience', 'age', 'gender', 'education',
+  'avg_volcano', 'avg_earthquake', 'avg_resilience',
+  'resilience_index',  'resilience_individual', 'resilience_household',
+  'resilience_community', 'resilience_society',
+  'age', 'gender', 'education',
   'individual_income', 'country_income', 'pct_university'
 )
 
@@ -1567,39 +1821,30 @@ cormat <- cor(df_preds, method = 'pearson', use = 'pairwise.complete.obs')
 diag(cormat) <- NA
 
 cnames <- c(
-  'Flood | Heavy rain | Rainstorm (within)',
-  'Hurricane | Cyclone | Typhoon (within)',
-  'Wildfire (within)',
-  'Heatwave (within)',
-  'Drought (within)',
-  'Thunder or lightning storm (within)',
-  'Blizzard or snowstorm (within)',
-  'Sandstorm (within)',
-  'Mudslide | Landslide (within)',
-  'Tornado (within)',
-  'Volcano eruption (within)',
-  'Earthquake (within)',
-  'Resilience (within)',
-  'Flood | Heavy rain | Rainstorm (between)',
-  'Hurricane | Cyclone | Typhoon (between)',
-  'Wildfire (between)',
-  'Heatwave (between)',
-  'Drought (between)',
-  'Thunder or lightning storm (between)',
-  'Blizzard or snowstorm (between)',
-  'Sandstorm (between)',
-  'Mudslide | Landslide (between)',
-  'Tornado (between)',
-  'Volcano eruption (between)',
-  'Earthquake (between)',
-  'Resilience (between)',
+  'Flood | Heavy rain | Rainstorm (country average)',
+  'Hurricane | Cyclone | Typhoon (country average)',
+  'Wildfire (country average)',
+  'Heatwave (country average)',
+  'Drought (country average)',
+  'Thunder or lightning storm (country average)',
+  'Blizzard or snowstorm (country average)',
+  'Sandstorm (country average)',
+  'Mudslide | Landslide (country average)',
+  'Tornado (country average)',
+  'Volcano eruption (country average)',
+  'Earthquake (country average)',
+  'Resilience (country average)',
+  'Resilience (combined)',
+  'Resilience (individual)',
+  'Resilience (household)',
+  'Resilience (community)',
+  'Resilience (society)',
   'Age', 'Gender', 'Education', 'Individual income', 'Country income', '% University'
 )
 
 colnames(cormat) <- rownames(cormat) <- cnames
 
-pdf('figures/FigureS3.pdf', width = 10, height = 9)
-# Hazards trivially not correlated because one can only indicate a single hazard
+pdf('figures/FigureS4.pdf', width = 10, height = 9)
 corrplot(
   cormat, method = 'color', type = 'upper', number.cex = 0.50,
   addCoef.col = 'black',
@@ -1618,7 +1863,9 @@ corrplot(
 )
 ```
 
-## Supplementary figure 4: Country heterogeneity
+## Supplementary figure 5: Country heterogeneity
+We visualize the climate-related hazard experience and risk perception link heterogeneity across countries.
+
 ```{r, fig.height = 12}
 peffc <- ggplot(
   df_effects_occurs,
@@ -1659,19 +1906,25 @@ peffc
 ```
 
 ```{r}
-ggsave('figures/FigureS4.pdf', peffc, width = 9, height = 14)
+ggsave('figures/FigureS5.pdf', peffc, width = 9, height = 14)
 ```
 
+## Supplementary figure 6: Standard deviation of random slopes
+We provide another angle on country heterogeneity by visualizing the showing the standard deviation of the random slopes.
 
-## Supplementary figure 5: Standard deviation of random slopes
 ```{r, fig.width = 10, fig.height = 5}
 df_sd <- VarCorr(mb_country)$country$sd %>% 
   data.frame() %>% 
   rownames_to_column() %>% 
   filter(
-    rowname %in% c(variables, 'individual_incomerichest20', 'educationuniversity')
+    grepl('hazard_type|individual_incomerichest20|educationuniversity', rowname)
   ) %>% 
   mutate(
+    rowname = ifelse(
+      grepl('hazard_type', rowname),
+      str_sub(rowname, 12, nchar(rowname)),
+      rowname
+    ),
     term = map_chr(str_split(rowname, '_'), 1),
     term = ifelse(
       !(term %in% c('individual', 'educationuniversity')),
@@ -1730,7 +1983,7 @@ psd
 ```
 
 ```{r}
-ggsave('figures/FigureS5.pdf', psd, width = 10, height = 5)
+ggsave('figures/FigureS6.pdf', psd, width = 10, height = 5)
 ```
 
 # Session info

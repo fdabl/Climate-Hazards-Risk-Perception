@@ -243,7 +243,6 @@ calculate_effects <- function(df_country, mb_country, variables) {
   countries5 <- countries[seq(121, 142)]
   
   for (varname in variables) {
-    print(varname)
     
     filename1a <- paste0('results/', varname, '_countries1.csv')
     filename1b <- paste0('results/', varname, '_countries2.csv')
